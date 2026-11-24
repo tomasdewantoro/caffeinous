@@ -10,8 +10,8 @@ There are two builds from the same source, with the same features:
 Lid-closed mode needs no root: it calls the `kPMSetClamshellSleepState` selector (12, declared
 in the SDK's `IOPMLibDefs.h`) on the `IOPMrootDomain` user client, which works inside the App
 Sandbox. The selector is not documented API, so App Review may object under guideline 2.5.1.
-If it does, the fallback is to remove the menu item from the App Store build; the GitHub build
-is unaffected.
+Lid-closed mode is the point of the app: if App Review rejects it, Caffeinous is not published
+on the Mac App Store at all, and GitHub (plus Homebrew) stays the only distribution.
 
 ## GitHub release
 
