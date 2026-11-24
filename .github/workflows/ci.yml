@@ -31,11 +31,8 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all --check
 
-      - name: cargo clippy (direct build)
+      - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: cargo clippy (App Store build, no lid feature)
-        run: cargo clippy -p caffeinous-app --all-targets --no-default-features --locked -- -D warnings
 
       - name: cargo test
         run: cargo test --workspace --locked

@@ -1,13 +1,14 @@
 //! `caffeinous`: keep a Mac awake from the command line. Flags match `caffeinate`, plus `--lid`.
 
+use std::io::{self, Write};
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use caffeinous_core::lid::{self, Elevation, Recovery};
-use caffeinous_core::{Assertion, Error, Kind};
+use caffeinous_core::lid::{self, Recovery};
+use caffeinous_core::{Assertion, Error, Kind, health};
 use clap::{Parser, Subcommand};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 
@@ -36,7 +37,7 @@ struct Cli {
     /// Declare the user active: wakes the display and resets the idle timer
     #[arg(short = 'u', long)]
     user: bool,
-    /// Keep running with the lid closed (asks for sudo; restored on exit)
+    /// Keep running with the lid closed (no password; stops at low battery or high heat)
     #[arg(short = 'l', long)]
     lid: bool,
     /// Stop after this many seconds
@@ -54,26 +55,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
-    /// Show the lid-close setting and active power assertions
+    /// Show lid-closed wake, battery, thermal state and active power assertions
     Status,
     /// Re-enable lid-close sleep (after a crash or `kill -9`)
     Restore,
-    /// Let `--lid` run without a password (installs /etc/sudoers.d/caffeinous)
-    AllowPasswordless,
-    /// Remove the passwordless rule
-    DisallowPasswordless,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.action {
         Some(Action::Status) => status(),
-        Some(Action::Restore) => lid::force_restore(Elevation::Terminal)
-            .map(|()| eprintln!("caffeinous: lid-close sleep is enabled")),
-        Some(Action::AllowPasswordless) => lid::install_passwordless()
-            .map(|()| eprintln!("caffeinous: `--lid` no longer asks for a password")),
-        Some(Action::DisallowPasswordless) => lid::uninstall_passwordless()
-            .map(|()| eprintln!("caffeinous: passwordless rule removed")),
+        Some(Action::Restore) => {
+            lid::force_restore().map(|()| eprintln!("caffeinous: lid-close sleep is enabled"))
+        }
         None => return run(cli),
     };
     match result {
@@ -149,6 +143,7 @@ fn run(cli: Cli) -> ExitCode {
 
     let deadline = cli.timeout.map(|s| Instant::now() + Duration::from_secs(s));
     let mut code = ExitCode::SUCCESS;
+    let mut next_lid_check = Instant::now() + lid::REASSERT_INTERVAL;
     while !stop.load(Ordering::Relaxed) {
         if deadline.is_some_and(|d| Instant::now() >= d) {
             break;
@@ -170,6 +165,20 @@ fn run(cli: Cli) -> ExitCode {
                 }
             }
         }
+        if let Some(guard) = lid_guard.as_ref()
+            && Instant::now() >= next_lid_check
+        {
+            next_lid_check = Instant::now() + lid::REASSERT_INTERVAL;
+            if let Some(reason) = lid::should_stop() {
+                eprintln!("caffeinous: stopping, {reason}");
+                break;
+            }
+            if let Err(e) = guard.reassert() {
+                eprintln!("caffeinous: could not keep lid-closed wake: {e}");
+                code = ExitCode::FAILURE;
+                break;
+            }
+        }
         sleep(POLL);
     }
 
@@ -186,37 +195,44 @@ fn run(cli: Cli) -> ExitCode {
 }
 
 fn acquire_lid() -> Result<lid::Guard, Error> {
-    // A dead earlier run may have left sleep disabled; repair it first so the new guard
-    // does not mistake that for a setting the user chose and skip restoring it.
-    if lid::recover(Elevation::Terminal)? == Recovery::Restored {
-        eprintln!("caffeinous: re-enabled lid-close sleep left disabled by an earlier run");
+    if lid::recover()? == Recovery::Restored {
+        eprintln!("caffeinous: re-enabled lid-close sleep left on by a crashed run");
     }
-    lid::Guard::acquire(Elevation::Terminal)
+    if let Some(reason) = lid::should_stop() {
+        return Err(std::io::Error::other(format!("not keeping the lid awake: {reason}")).into());
+    }
+    lid::Guard::acquire()
 }
 
 fn status() -> Result<(), Error> {
-    let disabled = lid::is_sleep_disabled()?;
-    println!(
-        "lid-close sleep: {}",
-        if disabled {
-            "disabled (stays on with the lid closed)"
-        } else {
-            "enabled"
-        }
-    );
-    println!(
-        "passwordless --lid: {}",
-        if lid::passwordless_installed() {
-            "allowed"
-        } else {
-            "not set up"
-        }
-    );
-    let out = Command::new("/usr/bin/pmset")
+    let holders = lid::holders();
+    let lid_line = if holders.is_empty() {
+        "off".to_owned()
+    } else {
+        let pids: Vec<_> = holders.iter().map(u32::to_string).collect();
+        format!("on (pid {})", pids.join(", "))
+    };
+    let battery = match health::battery() {
+        Some(b) => format!(
+            "{}%, {}",
+            b.percent,
+            if b.discharging { "on battery" } else { "on AC" }
+        ),
+        None => "none".to_owned(),
+    };
+    let assertions = Command::new("/usr/bin/pmset")
         .args(["-g", "assertions"])
         .output()?;
-    print!("{}", String::from_utf8_lossy(&out.stdout));
-    Ok(())
+    let mut out = io::stdout().lock();
+    let written = writeln!(out, "lid-closed wake: {lid_line}")
+        .and_then(|()| writeln!(out, "battery: {battery}"))
+        .and_then(|()| writeln!(out, "thermal state: {:?}", health::thermal_state()))
+        .and_then(|()| out.write_all(&assertions.stdout));
+    match written {
+        // `caffeinous status | head` closes the pipe early; that is not an error.
+        Err(e) if e.kind() != io::ErrorKind::BrokenPipe => Err(e.into()),
+        _ => Ok(()),
+    }
 }
 
 fn fail(e: &Error) -> ExitCode {

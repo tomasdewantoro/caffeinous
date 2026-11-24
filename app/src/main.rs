@@ -8,6 +8,7 @@ mod ui;
 
 use std::time::{Duration, Instant, SystemTime};
 
+use caffeinous_core::lid;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 use tao::event::{Event, StartCause};
@@ -35,7 +36,7 @@ fn main() {
         let _ = proxy.send_event(UserEvent::Menu(e));
     }));
 
-    // SIGTERM/SIGINT/SIGHUP quit cleanly so lid-close sleep is restored.
+    // SIGTERM/SIGINT/SIGHUP quit cleanly so lid-close sleep is turned back on.
     let proxy = event_loop.create_proxy();
     match Signals::new([SIGTERM, SIGINT, SIGHUP]) {
         Ok(mut signals) => {
@@ -49,6 +50,7 @@ fn main() {
     }
 
     let mut app: Option<(Ui, Awake)> = None;
+    let mut next_lid_check = Instant::now();
 
     event_loop.run(move |event, _, control_flow| {
         match event {
@@ -82,27 +84,35 @@ fn main() {
             return;
         };
         awake.expire_if_due();
+        if Instant::now() >= next_lid_check {
+            next_lid_check = Instant::now() + lid::REASSERT_INTERVAL;
+            awake.check_lid();
+        }
         ui.refresh(awake);
         if *control_flow != ControlFlow::Exit {
-            *control_flow = match next_wakeup(awake) {
-                Some(at) => ControlFlow::WaitUntil(at),
-                None => ControlFlow::Wait,
-            };
+            *control_flow = ControlFlow::WaitUntil(next_wakeup(awake, next_lid_check));
         }
     });
 }
 
-/// While a timer runs, wake at the deadline or the next minute, whichever comes first,
-/// so the remaining time in the menu stays current.
-fn next_wakeup(awake: &Awake) -> Option<Instant> {
-    let until = awake.until()?;
-    let left = until
-        .duration_since(SystemTime::now())
-        .unwrap_or(Duration::ZERO);
-    let to_minute = Duration::from_secs(
-        60 - SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() % 60),
-    );
-    Some(Instant::now() + left.min(to_minute))
+/// Wakes for the timer deadline, the next minute while a timer runs (so the time left stays
+/// current), and the next lid check while lid-closed mode is held.
+fn next_wakeup(awake: &Awake, next_lid_check: Instant) -> Instant {
+    let mut at = if awake.lid_active() {
+        next_lid_check
+    } else {
+        Instant::now() + Duration::from_secs(3600)
+    };
+    if let Some(until) = awake.until() {
+        let left = until
+            .duration_since(SystemTime::now())
+            .unwrap_or(Duration::ZERO);
+        let to_minute = Duration::from_secs(
+            60 - SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() % 60),
+        );
+        at = at.min(Instant::now() + left.min(to_minute));
+    }
+    at
 }

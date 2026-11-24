@@ -1,106 +1,154 @@
-//! Lid-closed (clamshell) wake.
+//! Lid-closed (clamshell) wake, without root.
 //!
-//! No IOKit assertion prevents clamshell sleep on a laptop without an external display. The
-//! supported knob is `pmset -a disablesleep 1`, which needs root and persists across reboots.
-//! [`Guard`] turns it on and restores it on drop. A marker file records that Caffeinous changed
-//! the setting, so a crashed or force-killed process can be repaired by [`recover`].
+//! `IOPMrootDomain`'s user client takes selector `kPMSetClamshellSleepState` (12, declared in the
+//! SDK's `IOPMLibDefs.h`), which sets the powerd bit of the kernel's clamshell-sleep-disable mask.
+//! XNU checks no privilege or entitlement for it, so a normal user can call it, also inside the
+//! App Sandbox. It is not documented API, so callers must treat failure as a real possibility.
+//!
+//! The bit is kernel state, not tied to the caller:
+//! - it outlives the process, so a crash leaves the Mac awake with the lid closed until someone
+//!   clears it or the Mac restarts. Each holder records its pid in a holder directory, and
+//!   [`recover`] clears the bit for holders that died;
+//! - powerd writes the same bit (around sleep and wake), so holders re-apply it every
+//!   [`REASSERT_INTERVAL`] with [`Guard::reassert`];
+//! - it cannot be read back (the registry's `AppleClamshellCausesSleep` only updates on lid
+//!   events), so the holder directory is the only record of who wants it set.
 
+use std::ffi::{c_char, c_void};
 use std::fs;
 use std::io;
-use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use crate::{BUNDLE_ID, Error};
+use crate::{BUNDLE_ID, Error, health};
 
-const PMSET: &str = "/usr/bin/pmset";
-const SUDO: &str = "/usr/bin/sudo";
-const OSASCRIPT: &str = "/usr/bin/osascript";
-const SUDOERS_FILE: &str = "/etc/sudoers.d/caffeinous";
+/// How often a holder re-applies the bit while it holds it.
+pub const REASSERT_INTERVAL: Duration = Duration::from_secs(15);
 
-/// How to obtain root for `pmset`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Elevation {
-    /// `sudo`, which prompts on the terminal when no rule allows it without a password.
-    /// For command-line use.
-    Terminal,
-    /// `sudo -n` when the passwordless rule is installed, otherwise the standard macOS
-    /// administrator dialog. For the menu-bar app, which has no terminal.
-    Dialog,
+/// Lid-closed wake stops at or below this charge while on battery.
+pub const BATTERY_FLOOR_PERCENT: u8 = 10;
+
+const K_PM_SET_CLAMSHELL_SLEEP_STATE: u32 = 12;
+
+type MachPort = u32;
+type KernReturn = i32;
+
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOServiceMatching(name: *const c_char) -> *mut c_void;
+    fn IOServiceGetMatchingService(main_port: MachPort, matching: *mut c_void) -> MachPort;
+    fn IOServiceOpen(
+        service: MachPort,
+        task: MachPort,
+        kind: u32,
+        connect: *mut MachPort,
+    ) -> KernReturn;
+    fn IOServiceClose(connect: MachPort) -> KernReturn;
+    fn IOObjectRelease(object: MachPort) -> KernReturn;
+    fn IOConnectCallScalarMethod(
+        connection: MachPort,
+        selector: u32,
+        input: *const u64,
+        input_count: u32,
+        output: *mut u64,
+        output_count: *mut u32,
+    ) -> KernReturn;
 }
 
-/// True when lid-close sleep is currently disabled system-wide.
-pub fn is_sleep_disabled() -> Result<bool, Error> {
-    let out = run(Command::new(PMSET).arg("-g"))?;
-    Ok(parse_sleep_disabled(&String::from_utf8_lossy(&out.stdout)))
+unsafe extern "C" {
+    /// The value behind the `mach_task_self()` macro.
+    static mach_task_self_: MachPort;
 }
 
-fn parse_sleep_disabled(pmset_g: &str) -> bool {
-    pmset_g
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix("SleepDisabled"))
-        .any(|v| v.trim() == "1")
-}
-
-/// Sets `pmset -a disablesleep`, elevating as requested.
-pub fn set_sleep_disabled(disabled: bool, elevation: Elevation) -> Result<(), Error> {
-    let value = if disabled { "1" } else { "0" };
-    if is_root() {
-        return run(Command::new(PMSET).args(["-a", "disablesleep", value])).map(drop);
-    }
-    match elevation {
-        Elevation::Terminal => {
-            run(Command::new(SUDO).args([PMSET, "-a", "disablesleep", value])).map(drop)
+/// Sets or clears lid-close sleep prevention in the kernel.
+fn set_clamshell_sleep_disabled(disabled: bool) -> Result<(), Error> {
+    // SAFETY: plain IOKit calls; `matching` is consumed by IOServiceGetMatchingService, and the
+    // service and connection are released on every path.
+    unsafe {
+        let matching = IOServiceMatching(c"IOPMrootDomain".as_ptr());
+        if matching.is_null() {
+            return Err(Error::IoKit {
+                call: "IOServiceMatching",
+                code: 0,
+            });
         }
-        Elevation::Dialog => {
-            let quiet = Command::new(SUDO)
-                .args(["-n", PMSET, "-a", "disablesleep", value])
-                .output()?;
-            if quiet.status.success() {
-                return Ok(());
-            }
-            admin_shell(&format!("{PMSET} -a disablesleep {value}"))
+        let service = IOServiceGetMatchingService(0, matching);
+        if service == 0 {
+            return Err(Error::IoKit {
+                call: "IOServiceGetMatchingService",
+                code: 0,
+            });
+        }
+        let mut connect: MachPort = 0;
+        let code = IOServiceOpen(service, mach_task_self_, 0, &mut connect);
+        IOObjectRelease(service);
+        if code != 0 {
+            return Err(Error::IoKit {
+                call: "IOServiceOpen(IOPMrootDomain)",
+                code,
+            });
+        }
+        let input = [u64::from(disabled)];
+        let code = IOConnectCallScalarMethod(
+            connect,
+            K_PM_SET_CLAMSHELL_SLEEP_STATE,
+            input.as_ptr(),
+            1,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        IOServiceClose(connect);
+        if code != 0 {
+            return Err(Error::IoKit {
+                call: "kPMSetClamshellSleepState",
+                code,
+            });
         }
     }
+    Ok(())
 }
 
-/// Holds lid-close sleep disabled. Restores the previous state on drop.
+/// Keeps the Mac running with the lid closed while held. Released on drop.
 #[derive(Debug)]
 pub struct Guard {
-    elevation: Elevation,
-    changed: bool,
+    dir: PathBuf,
+    held: bool,
 }
 
 impl Guard {
-    pub fn acquire(elevation: Elevation) -> Result<Self, Error> {
-        if is_sleep_disabled()? {
-            // Someone else disabled it; leave it exactly as we found it.
-            return Ok(Self {
-                elevation,
-                changed: false,
-            });
+    pub fn acquire() -> Result<Self, Error> {
+        let dir = holder_dir().ok_or_else(|| io::Error::other("HOME is not set"))?;
+        fs::create_dir_all(&dir)?;
+        // Record first, so a crash right after the kernel call is still recoverable.
+        fs::write(dir.join(std::process::id().to_string()), b"")?;
+        if let Err(e) = set_clamshell_sleep_disabled(true) {
+            let _ = fs::remove_file(dir.join(std::process::id().to_string()));
+            return Err(e);
         }
-        set_sleep_disabled(true, elevation)?;
-        // Best effort: without the marker, `recover` cannot tell our change from the user's.
-        let _ = write_marker();
-        Ok(Self {
-            elevation,
-            changed: true,
-        })
+        Ok(Self { dir, held: true })
     }
 
-    /// Restores sleep now and reports failure, instead of the silent best effort of `drop`.
+    /// Re-applies the bit; powerd may have cleared it. Call every [`REASSERT_INTERVAL`].
+    pub fn reassert(&self) -> Result<(), Error> {
+        set_clamshell_sleep_disabled(true)
+    }
+
+    /// Releases now and reports failure, instead of the silent best effort of `drop`.
     pub fn release(mut self) -> Result<(), Error> {
         self.restore()
     }
 
     fn restore(&mut self) -> Result<(), Error> {
-        if !self.changed {
+        if !self.held {
             return Ok(());
         }
-        set_sleep_disabled(false, self.elevation)?;
-        self.changed = false;
-        remove_marker();
-        Ok(())
+        self.held = false;
+        let _ = fs::remove_file(self.dir.join(std::process::id().to_string()));
+        // Another live Caffeinous (the app and the CLI can both hold it) still wants it set.
+        if !live_holders(&self.dir).is_empty() {
+            return Ok(());
+        }
+        set_clamshell_sleep_disabled(false)
     }
 }
 
@@ -115,144 +163,106 @@ impl Drop for Guard {
 /// What [`recover`] found.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Recovery {
-    /// No marker: nothing to repair.
+    /// No dead holders.
     Clean,
-    /// The process that set the marker is still running.
+    /// Dead holders were removed; another live holder still keeps the lid awake.
     InUse,
-    /// A dead process left sleep disabled; it has been re-enabled.
+    /// Dead holders were removed and lid-close sleep was re-enabled.
     Restored,
-    /// A dead process left a marker but sleep was already enabled; the marker was removed.
-    StaleMarker,
 }
 
-/// Re-enables lid-close sleep if a previous Caffeinous process disabled it and died without
-/// restoring it (crash, `kill -9`, power loss).
-pub fn recover(elevation: Elevation) -> Result<Recovery, Error> {
-    let Some(pid) = read_marker() else {
+/// Re-enables lid-close sleep if a Caffeinous process that held it died without releasing it
+/// (crash, `kill -9`). A restart also clears it.
+pub fn recover() -> Result<Recovery, Error> {
+    let Some(dir) = holder_dir() else {
         return Ok(Recovery::Clean);
     };
-    if pid != std::process::id() && process_alive(pid) {
+    if reap_dead_holders(&dir) == 0 {
+        return Ok(Recovery::Clean);
+    }
+    if !live_holders(&dir).is_empty() {
         return Ok(Recovery::InUse);
     }
-    if is_sleep_disabled()? {
-        set_sleep_disabled(false, elevation)?;
-        remove_marker();
-        Ok(Recovery::Restored)
-    } else {
-        remove_marker();
-        Ok(Recovery::StaleMarker)
+    set_clamshell_sleep_disabled(false)?;
+    Ok(Recovery::Restored)
+}
+
+/// Unconditionally re-enables lid-close sleep and forgets all holders.
+pub fn force_restore() -> Result<(), Error> {
+    if let Some(dir) = holder_dir() {
+        let _ = fs::remove_dir_all(dir);
+    }
+    set_clamshell_sleep_disabled(false)
+}
+
+/// Pids of running Caffeinous processes that hold lid-closed wake.
+pub fn holders() -> Vec<u32> {
+    holder_dir().map_or_else(Vec::new, |dir| live_holders(&dir))
+}
+
+/// Why lid-closed wake should stop now, if it should.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    LowBattery(u8),
+    Hot,
+}
+
+impl std::fmt::Display for StopReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LowBattery(p) => write!(f, "battery at {p}%"),
+            Self::Hot => f.write_str("the Mac is running hot"),
+        }
     }
 }
 
-/// Unconditionally re-enables lid-close sleep and clears the marker.
-pub fn force_restore(elevation: Elevation) -> Result<(), Error> {
-    if is_sleep_disabled()? {
-        set_sleep_disabled(false, elevation)?;
+/// Checks the safety limits for running with the lid closed: a serious or critical thermal
+/// state, or a battery at or below [`BATTERY_FLOOR_PERCENT`] while unplugged.
+pub fn should_stop() -> Option<StopReason> {
+    if health::thermal_state() >= health::Thermal::Serious {
+        return Some(StopReason::Hot);
     }
-    remove_marker();
-    Ok(())
+    match health::battery() {
+        Some(b) if b.discharging && b.percent <= BATTERY_FLOOR_PERCENT => {
+            Some(StopReason::LowBattery(b.percent))
+        }
+        _ => None,
+    }
 }
 
-/// True when `/etc/sudoers.d/caffeinous` exists, so toggling needs no password.
-pub fn passwordless_installed() -> bool {
-    fs::metadata(SUDOERS_FILE).is_ok()
-}
-
-/// Installs a sudoers rule that lets the current user run exactly
-/// `pmset -a disablesleep 0|1` without a password. Asks for an administrator password once.
-pub fn install_passwordless() -> Result<(), Error> {
-    let user = current_user()?;
-    let rule = sudoers_rule(&user);
-    let tmp = std::env::temp_dir().join(format!("caffeinous-sudoers-{}", std::process::id()));
-    fs::write(&tmp, rule)?;
-    let tmp_path = tmp.to_string_lossy();
-    // visudo validates before install, so a bad file can never lock the user out of sudo.
-    let script = format!(
-        "/usr/sbin/visudo -cf '{tmp_path}' && \
-         /usr/bin/install -m 0440 -o root -g wheel '{tmp_path}' {SUDOERS_FILE}"
-    );
-    let result = admin_shell(&script);
-    let _ = fs::remove_file(&tmp);
-    result
-}
-
-/// Removes the sudoers rule. Asks for an administrator password.
-pub fn uninstall_passwordless() -> Result<(), Error> {
-    admin_shell(&format!("/bin/rm -f {SUDOERS_FILE}"))
-}
-
-fn sudoers_rule(user: &str) -> String {
-    format!(
-        "# Installed by Caffeinous: toggle lid-close sleep without a password.\n\
-         {user} ALL=(root) NOPASSWD: {PMSET} -a disablesleep 0, {PMSET} -a disablesleep 1\n"
+fn holder_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join("Library/Application Support")
+            .join(BUNDLE_ID)
+            .join("lid-holders"),
     )
 }
 
-/// Login name, restricted to characters that are safe inside sudoers and a shell string.
-fn current_user() -> Result<String, Error> {
-    // SAFETY: getpwuid returns a pointer into static storage or null; we copy out immediately.
-    let name = unsafe {
-        let pw = libc::getpwuid(libc::getuid());
-        if pw.is_null() {
-            return Err(io::Error::other("cannot resolve the current user").into());
-        }
-        std::ffi::CStr::from_ptr((*pw).pw_name)
-            .to_string_lossy()
-            .into_owned()
+fn holder_pids(dir: &Path) -> Vec<u32> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
     };
-    let safe = !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
-    if safe {
-        Ok(name)
-    } else {
-        Err(io::Error::other(format!("unsupported user name {name:?}")).into())
-    }
+    entries
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+        .collect()
 }
 
-/// Runs `script` as root through the standard macOS administrator dialog.
-/// `script` must contain no double quotes or backslashes; callers only pass fixed strings.
-fn admin_shell(script: &str) -> Result<(), Error> {
-    debug_assert!(!script.contains(['"', '\\']));
-    let apple_script = format!(
-        "do shell script \"{script}\" with prompt \"Caffeinous needs to change the lid-close \
-         sleep setting.\" with administrator privileges"
-    );
-    let out = Command::new(OSASCRIPT)
-        .args(["-e", &apple_script])
-        .output()?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    // -128 is AppleScript's "User canceled".
-    if stderr.contains("(-128)") {
-        return Err(Error::Cancelled);
-    }
-    Err(Error::Command {
-        command: "osascript (administrator)".into(),
-        status: out.status,
-        stderr,
-    })
+fn live_holders(dir: &Path) -> Vec<u32> {
+    holder_pids(dir)
+        .into_iter()
+        .filter(|&pid| process_alive(pid))
+        .collect()
 }
 
-fn run(cmd: &mut Command) -> Result<Output, Error> {
-    let out = cmd.output()?;
-    if out.status.success() {
-        Ok(out)
-    } else {
-        Err(Error::Command {
-            command: format!("{cmd:?}"),
-            status: out.status,
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        })
-    }
-}
-
-fn is_root() -> bool {
-    // SAFETY: geteuid has no preconditions.
-    unsafe { libc::geteuid() == 0 }
+/// Removes holder files of processes that no longer run. Returns how many were removed.
+fn reap_dead_holders(dir: &Path) -> usize {
+    holder_pids(dir)
+        .into_iter()
+        .filter(|&pid| !process_alive(pid))
+        .filter(|pid| fs::remove_file(dir.join(pid.to_string())).is_ok())
+        .count()
 }
 
 /// `kill(pid, 0)` probes existence; EPERM means it exists but belongs to another user.
@@ -260,59 +270,40 @@ pub fn process_alive(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
     };
+    if pid <= 0 {
+        return false;
+    }
     // SAFETY: signal 0 performs only the permission/existence check.
     unsafe { libc::kill(pid, 0) == 0 || *libc::__error() == libc::EPERM }
-}
-
-fn marker_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(
-        PathBuf::from(home)
-            .join("Library/Application Support")
-            .join(BUNDLE_ID)
-            .join("lid-disabled.pid"),
-    )
-}
-
-fn write_marker() -> io::Result<()> {
-    let path = marker_path().ok_or_else(|| io::Error::other("HOME is not set"))?;
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    fs::write(path, std::process::id().to_string())
-}
-
-fn read_marker() -> Option<u32> {
-    fs::read_to_string(marker_path()?).ok()?.trim().parse().ok()
-}
-
-fn remove_marker() {
-    if let Some(path) = marker_path() {
-        let _ = fs::remove_file(path);
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_sleep_disabled_from_pmset() {
-        let on = "System-wide power settings:\n SleepDisabled\t\t1\nCurrently in use:\n sleep 1\n";
-        let off = "System-wide power settings:\n SleepDisabled\t\t0\n";
-        assert!(parse_sleep_disabled(on));
-        assert!(!parse_sleep_disabled(off));
-        assert!(!parse_sleep_disabled("Currently in use:\n sleep 1\n"));
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
     }
 
     #[test]
-    fn sudoers_rule_allows_only_the_two_pmset_commands() {
-        let rule = sudoers_rule("tomas");
-        let grant = rule.lines().nth(1).unwrap();
-        assert_eq!(
-            grant,
-            "tomas ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, \
-             /usr/bin/pmset -a disablesleep 1"
-        );
+    fn dead_holders_are_reaped_and_live_ones_kept() {
+        let dir = std::env::temp_dir().join(format!("caffeinous-holders-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let me = std::process::id();
+        let dead = dead_pid();
+        fs::write(dir.join(me.to_string()), b"").unwrap();
+        fs::write(dir.join(dead.to_string()), b"").unwrap();
+        fs::write(dir.join("not-a-pid"), b"").unwrap();
+
+        assert_eq!(live_holders(&dir), vec![me]);
+        assert_eq!(reap_dead_holders(&dir), 1);
+        assert!(!dir.join(dead.to_string()).exists());
+        assert!(dir.join(me.to_string()).exists());
+        assert_eq!(reap_dead_holders(&dir), 0);
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

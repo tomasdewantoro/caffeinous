@@ -12,12 +12,6 @@ publish = false
 name = "caffeinous-app"
 path = "src/main.rs"
 
-[features]
-default = ["lid"]
-# Lid-closed wake needs root (`pmset`), which the App Store sandbox forbids.
-# Build with `--no-default-features` for the Mac App Store.
-lid = []
-
 [dependencies]
 caffeinous-core.workspace = true
 tao = { version = "0.37", default-features = false }

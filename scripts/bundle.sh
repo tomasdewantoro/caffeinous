@@ -3,7 +3,7 @@
 #
 #   scripts/bundle.sh                        # direct build for this Mac's architecture
 #   scripts/bundle.sh --universal            # arm64 + x86_64
-#   scripts/bundle.sh --appstore --universal # sandboxed, no lid feature, signed .pkg
+#   scripts/bundle.sh --appstore --universal # sandboxed, signed .pkg for App Store Connect
 #
 # Signing is optional and driven by environment variables:
 #   SIGN_IDENTITY       "Developer ID Application: …" (direct) or "Apple Distribution: …" (appstore)
@@ -26,9 +26,6 @@ done
 version=$(cargo metadata --no-deps --format-version 1 \
   | jq -r '.packages[] | select(.name == "caffeinous-app") | .version')
 build=${BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}
-# Always non-empty: macOS ships bash 3.2, where "${empty[@]}" fails under `set -u`.
-features=(--features "")
-[[ $mode == appstore ]] && features=(--no-default-features)
 
 if [[ $universal == 1 ]]; then
   targets=(aarch64-apple-darwin x86_64-apple-darwin)
@@ -38,7 +35,7 @@ fi
 
 bins=()
 for t in "${targets[@]}"; do
-  cargo build --release --locked -p caffeinous-app --target "$t" "${features[@]}"
+  cargo build --release --locked -p caffeinous-app --target "$t"
   bins+=("target/$t/release/caffeinous-app")
   if [[ $mode == direct ]]; then
     cargo build --release --locked -p caffeinous-cli --target "$t"

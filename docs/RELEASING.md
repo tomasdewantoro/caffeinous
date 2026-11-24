@@ -1,16 +1,17 @@
 # Releasing Caffeinous
 
-There are two builds from the same source:
+There are two builds from the same source, with the same features:
 
-| Build | Command | Lid-closed mode | Signed with | Ships via |
-|---|---|---|---|---|
-| Direct | `scripts/bundle.sh --universal` | yes | Developer ID Application | GitHub Releases (dmg), CLI tarball |
-| Mac App Store | `scripts/bundle.sh --appstore --universal` | no | Apple Distribution + Mac Installer | App Store Connect (pkg) |
+| Build | Command | Signed with | Ships via |
+|---|---|---|---|
+| Direct | `scripts/bundle.sh --universal` | Developer ID Application | GitHub Releases (dmg), CLI tarball |
+| Mac App Store | `scripts/bundle.sh --appstore --universal` | Apple Distribution + Mac Installer | App Store Connect (pkg) |
 
-Lid-closed mode runs `pmset -a disablesleep`, which needs root. The App Store sandbox forbids
-that, so the App Store build is compiled with `--no-default-features`: no lid menu item, no
-password setting, and none of that code in the binary. Apple's review guideline 2.4.5 also
-rejects apps that request escalation to root, so do not try to ship the lid feature there.
+Lid-closed mode needs no root: it calls the `kPMSetClamshellSleepState` selector (12, declared
+in the SDK's `IOPMLibDefs.h`) on the `IOPMrootDomain` user client, which works inside the App
+Sandbox. The selector is not documented API, so App Review may object under guideline 2.5.1.
+If it does, the fallback is to remove the menu item from the App Store build; the GitHub build
+is unaffected.
 
 ## GitHub release
 

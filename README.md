@@ -35,25 +35,25 @@ Caffeinous lives in the menu bar (there is no Dock icon). Click the cup to open 
 | **Keep Running With Lid Closed** | Keeps the Mac running when the lid is shut, while Caffeinous is on |
 | **Settings ▸ Turn On at Launch** | Starts in the on state |
 | **Settings ▸ Launch at Login** | Opens Caffeinous when you log in |
-| **Settings ▸ Don't Ask for Password** | Lets the lid option work without an administrator password each time |
 
 ### Lid closed: how it works and what to watch
 
-macOS has no app-level switch for clamshell sleep; the power assertions `caffeinate` uses are
-ignored when the lid closes. Caffeinous runs `pmset -a disablesleep 1` while it's on and
-`pmset -a disablesleep 0` when it turns off. That system setting needs administrator rights, so
-macOS asks for your password, unless you turn on **Don't Ask for Password**, which installs
-`/etc/sudoers.d/caffeinous` allowing exactly those two commands and nothing else.
+The power assertions `caffeinate` uses don't stop the sleep that happens when you close the
+lid. Caffeinous tells the macOS power manager directly not to sleep on lid close, the same way
+macOS itself does while you're connected to an external display. That needs no administrator
+password and changes no system settings.
 
 > [!WARNING]
 > With the lid closed a MacBook cools worse. Don't put it in a bag or sleeve while Caffeinous
-> is on. On battery it keeps draining until you turn Caffeinous off.
+> is on.
 
-If Caffeinous is force-quit while the lid option is active, the setting stays until its next
-launch repairs it. To repair it by hand: `sudo pmset -a disablesleep 0`.
+Caffeinous stops keeping the lid awake on its own when:
 
-The Mac App Store version can't include this option: the App Store sandbox doesn't allow
-administrator commands. Everything else is the same.
+- the Mac gets hot (macOS reports a serious or critical thermal state), or
+- the battery is at 10% or less and not charging.
+
+It also stops when you turn Caffeinous off or quit it. If Caffeinous is force-quit, the next
+launch turns lid-close sleep back on, and so does restarting the Mac.
 
 ## Command line
 
@@ -65,9 +65,8 @@ caffeinous -d -t 3600         # also keep the display on, stop after an hour
 caffeinous -w 1234            # stay awake until process 1234 exits
 caffeinous -- cargo build     # stay awake while a command runs; returns its exit code
 caffeinous --lid -- ./backup.sh
-caffeinous status             # lid setting and current power assertions
-caffeinous restore            # re-enable lid-close sleep
-caffeinous allow-passwordless # --lid without a password prompt
+caffeinous status             # lid-closed wake, battery, heat and power assertions
+caffeinous restore            # turn lid-close sleep back on
 ```
 
 Flags: `-d` display, `-i` idle (default), `-m` disk, `-s` system (AC only), `-u` user active,
@@ -85,12 +84,12 @@ open dist/Caffeinous.app
 ```
 
 `scripts/bundle.sh --universal` builds for Apple Silicon and Intel;
-`scripts/bundle.sh --appstore` builds the sandboxed App Store variant. See
+`scripts/bundle.sh --appstore` builds the sandboxed App Store package. See
 [docs/RELEASING.md](docs/RELEASING.md).
 
 | Path | Contents |
 |---|---|
-| `crates/core` | Power assertions (IOKit) and the lid guard (`pmset`, crash recovery) |
+| `crates/core` | Power assertions, lid-closed wake (crash recovery, battery and heat limits) |
 | `crates/cli` | The `caffeinous` command |
 | `app` | The menu-bar app (`tao`, `tray-icon`, `objc2`) |
 | `assets` | Icons; `scripts/icons.sh` renders them from `assets/src/*.svg` |

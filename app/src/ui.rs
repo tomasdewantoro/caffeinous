@@ -15,10 +15,7 @@ pub enum Command {
     For(u64),
     Indefinitely,
     Display(bool),
-    #[cfg(feature = "lid")]
     Lid(bool),
-    #[cfg(feature = "lid")]
-    Passwordless(bool),
     OnAtLaunch(bool),
     LaunchAtLogin(bool),
     About,
@@ -48,10 +45,7 @@ pub struct Ui {
     durations: Vec<(MenuId, u64)>,
     indefinitely: MenuItem,
     display: CheckMenuItem,
-    #[cfg(feature = "lid")]
     lid: CheckMenuItem,
-    #[cfg(feature = "lid")]
-    passwordless: CheckMenuItem,
     on_at_launch: CheckMenuItem,
     launch_at_login: CheckMenuItem,
     about: MenuItem,
@@ -86,15 +80,7 @@ impl Ui {
 
         let prefs = awake.prefs();
         let display = CheckMenuItem::new("Keep Display On", true, prefs.keep_display_on, None);
-        #[cfg(feature = "lid")]
         let lid = CheckMenuItem::new("Keep Running With Lid Closed", true, prefs.lid_closed, None);
-        #[cfg(feature = "lid")]
-        let passwordless = CheckMenuItem::new(
-            "Don't Ask for Password",
-            true,
-            caffeinous_core::lid::passwordless_installed(),
-            None,
-        );
         let on_at_launch = CheckMenuItem::new("Turn On at Launch", true, prefs.on_at_launch, None);
         let launch_at_login =
             CheckMenuItem::new("Launch at Login", true, mac::launch_at_login(), None);
@@ -102,10 +88,6 @@ impl Ui {
         let settings = Submenu::new("Settings", true);
         settings
             .append_items(&[&on_at_launch, &launch_at_login])
-            .expect("append menu items");
-        #[cfg(feature = "lid")]
-        settings
-            .append_items(&[&PredefinedMenuItem::separator(), &passwordless])
             .expect("append menu items");
 
         let about = MenuItem::new("About Caffeinous", true, None);
@@ -120,11 +102,7 @@ impl Ui {
             &for_menu,
             &PredefinedMenuItem::separator(),
             &display,
-        ])
-        .expect("append menu items");
-        #[cfg(feature = "lid")]
-        menu.append(&lid).expect("append menu item");
-        menu.append_items(&[
+            &lid,
             &PredefinedMenuItem::separator(),
             &settings,
             &about,
@@ -153,10 +131,7 @@ impl Ui {
             durations,
             indefinitely,
             display,
-            #[cfg(feature = "lid")]
             lid,
-            #[cfg(feature = "lid")]
-            passwordless,
             on_at_launch,
             launch_at_login,
             about,
@@ -180,13 +155,8 @@ impl Ui {
         if id == self.display.id() {
             return Some(Command::Display(self.display.is_checked()));
         }
-        #[cfg(feature = "lid")]
         if id == self.lid.id() {
             return Some(Command::Lid(self.lid.is_checked()));
-        }
-        #[cfg(feature = "lid")]
-        if id == self.passwordless.id() {
-            return Some(Command::Passwordless(self.passwordless.is_checked()));
         }
         if id == self.on_at_launch.id() {
             return Some(Command::OnAtLaunch(self.on_at_launch.is_checked()));
@@ -213,12 +183,7 @@ impl Ui {
         self.display.set_checked(prefs.keep_display_on);
         self.on_at_launch.set_checked(prefs.on_at_launch);
         self.launch_at_login.set_checked(mac::launch_at_login());
-        #[cfg(feature = "lid")]
-        {
-            self.lid.set_checked(prefs.lid_closed);
-            self.passwordless
-                .set_checked(caffeinous_core::lid::passwordless_installed());
-        }
+        self.lid.set_checked(prefs.lid_closed);
 
         let shown = Shown {
             on: awake.is_on(),
@@ -245,14 +210,11 @@ fn status_text(awake: &Awake) -> String {
     if !awake.is_on() {
         return "Caffeinous: Off".into();
     }
-    #[cfg(feature = "lid")]
     let lid = if awake.lid_active() {
         ", lid closed OK"
     } else {
         ""
     };
-    #[cfg(not(feature = "lid"))]
-    let lid = "";
     match awake.until() {
         None => format!("Caffeinous: On{lid}"),
         Some(until) => {

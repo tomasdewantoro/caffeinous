@@ -1,7 +1,8 @@
-//! What the app is doing: held assertions, the optional lid guard, the timer, and preferences.
+//! What the app is doing: held assertions, the lid guard, the timer, and preferences.
 
 use std::time::{Duration, SystemTime};
 
+use caffeinous_core::lid::{self, Recovery};
 use caffeinous_core::{Assertion, Kind};
 
 use crate::mac::{self, Prefs};
@@ -14,8 +15,7 @@ pub struct Awake {
     /// Non-empty while on.
     assertions: Vec<Assertion>,
     until: Option<SystemTime>,
-    #[cfg(feature = "lid")]
-    lid: Option<caffeinous_core::lid::Guard>,
+    lid: Option<lid::Guard>,
 }
 
 impl Awake {
@@ -24,7 +24,6 @@ impl Awake {
             prefs: Prefs::load(),
             assertions: Vec::new(),
             until: None,
-            #[cfg(feature = "lid")]
             lid: None,
         }
     }
@@ -41,25 +40,21 @@ impl Awake {
         self.until
     }
 
-    #[cfg(feature = "lid")]
     pub fn lid_active(&self) -> bool {
         self.lid.is_some()
     }
 
     /// Repairs a lid setting left behind by a crash, then applies "turn on at launch".
     pub fn startup(&mut self) {
-        #[cfg(feature = "lid")]
-        {
-            use caffeinous_core::lid::{self, Elevation};
-            if let Err(e) = lid::recover(Elevation::Dialog) {
-                mac::alert(
-                    "Lid-close sleep may still be disabled",
-                    &format!(
-                        "A previous session turned it off and could not be undone: {e}\n\n\
-                         Run `sudo pmset -a disablesleep 0` in Terminal to restore it."
-                    ),
-                );
-            }
+        match lid::recover() {
+            Ok(Recovery::Clean | Recovery::InUse | Recovery::Restored) => {}
+            Err(e) => mac::alert(
+                "Lid-close sleep may still be off",
+                &format!(
+                    "A previous session kept the Mac awake with the lid closed and could not \
+                     be undone: {e}\n\nRestarting the Mac turns lid-close sleep back on."
+                ),
+            ),
         }
         if self.prefs.on_at_launch {
             self.turn_on(None);
@@ -88,10 +83,7 @@ impl Awake {
                     self.apply_assertions();
                 }
             }
-            #[cfg(feature = "lid")]
             Command::Lid(on) => self.set_lid_pref(on),
-            #[cfg(feature = "lid")]
-            Command::Passwordless(on) => set_passwordless(on),
             Command::OnAtLaunch(on) => {
                 self.prefs.on_at_launch = on;
                 self.prefs.save();
@@ -114,31 +106,52 @@ impl Awake {
         }
     }
 
+    /// Periodic lid upkeep: stops at the battery or thermal limit, otherwise re-applies the
+    /// kernel bit that powerd may have cleared.
+    pub fn check_lid(&mut self) {
+        let Some(guard) = self.lid.as_ref() else {
+            return;
+        };
+        if let Some(reason) = lid::should_stop() {
+            self.release_lid();
+            mac::notify_stop(&reason.to_string());
+            return;
+        }
+        if let Err(e) = guard.reassert() {
+            self.release_lid();
+            mac::alert(
+                "Stopped keeping the Mac awake with the lid closed",
+                &e.to_string(),
+            );
+        }
+    }
+
     fn turn_on(&mut self, duration: Option<Duration>) {
         self.until = duration.map(|d| SystemTime::now() + d);
         self.apply_assertions();
-        #[cfg(feature = "lid")]
         if self.is_on() && self.prefs.lid_closed && self.lid.is_none() {
             self.acquire_lid();
         }
     }
 
     fn turn_off(&mut self) {
-        #[cfg(feature = "lid")]
+        self.release_lid();
+        self.assertions.clear();
+        self.until = None;
+    }
+
+    fn release_lid(&mut self) {
         if let Some(guard) = self.lid.take()
             && let Err(e) = guard.release()
         {
             mac::alert(
-                "Lid-close sleep is still disabled",
+                "Lid-close sleep is still off",
                 &format!(
-                    "{e}\n\nYour Mac will keep running with the lid closed until this is \
-                     undone. Turn Caffeinous on and off again, or run \
-                     `sudo pmset -a disablesleep 0` in Terminal."
+                    "{e}\n\nThe Mac keeps running with the lid closed until Caffeinous turns \
+                     on and off again, or until the Mac restarts."
                 ),
             );
         }
-        self.assertions.clear();
-        self.until = None;
     }
 
     fn apply_assertions(&mut self) {
@@ -159,15 +172,13 @@ impl Awake {
         }
     }
 
-    #[cfg(feature = "lid")]
     fn set_lid_pref(&mut self, on: bool) {
         if on && !self.prefs.lid_warning_shown {
             let ok = mac::confirm(
                 "Keep running with the lid closed?",
-                "Your Mac will stay on when you close the lid, until Caffeinous turns off.\n\n\
-                 Don't put it in a bag or sleeve while it's on: with the lid closed it cools \
-                 poorly and can get hot. On battery it keeps draining.\n\n\
-                 Changing this setting needs an administrator password.",
+                "While Caffeinous is on, your Mac keeps running when you close the lid.\n\n\
+                 Don't put it in a bag or sleeve: with the lid closed it cools poorly. \
+                 Caffeinous stops if the Mac gets hot or the battery drops to 10%.",
                 "Keep Running",
             );
             if !ok {
@@ -182,41 +193,26 @@ impl Awake {
         }
         if on {
             self.acquire_lid();
-        } else if let Some(guard) = self.lid.take()
-            && let Err(e) = guard.release()
-        {
-            mac::alert("Could not re-enable lid-close sleep", &e.to_string());
+        } else {
+            self.release_lid();
         }
     }
 
-    #[cfg(feature = "lid")]
     fn acquire_lid(&mut self) {
-        use caffeinous_core::{Error, lid};
-        match lid::Guard::acquire(lid::Elevation::Dialog) {
+        if let Some(reason) = lid::should_stop() {
+            mac::alert(
+                "Not keeping the Mac awake with the lid closed",
+                &format!("Caffeinous won't start lid-closed mode because {reason}."),
+            );
+            return;
+        }
+        match lid::Guard::acquire() {
             Ok(guard) => self.lid = Some(guard),
-            Err(Error::Cancelled) => {
-                self.prefs.lid_closed = false;
-                self.prefs.save();
-            }
             Err(e) => {
                 self.prefs.lid_closed = false;
                 self.prefs.save();
                 mac::alert("Could not keep running with the lid closed", &e.to_string());
             }
         }
-    }
-}
-
-#[cfg(feature = "lid")]
-fn set_passwordless(on: bool) {
-    use caffeinous_core::{Error, lid};
-    let result = if on {
-        lid::install_passwordless()
-    } else {
-        lid::uninstall_passwordless()
-    };
-    match result {
-        Ok(()) | Err(Error::Cancelled) => {}
-        Err(e) => mac::alert("Could not change the password setting", &e.to_string()),
     }
 }

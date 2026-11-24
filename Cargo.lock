@@ -138,6 +138,7 @@ version = "0.1.0"
 dependencies = [
  "core-foundation",
  "libc",
+ "objc2-foundation",
 ]
 
 [[package]]

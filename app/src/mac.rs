@@ -65,13 +65,24 @@ pub fn alert(title: &str, message: &str) {
 }
 
 /// Returns true when the user chose `confirm`.
-#[cfg(feature = "lid")]
 pub fn confirm(title: &str, message: &str, confirm: &str) -> bool {
     activate();
     let alert = build_alert(title, message);
     alert.addButtonWithTitle(&NSString::from_str(confirm));
     alert.addButtonWithTitle(&NSString::from_str("Cancel"));
     alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn
+}
+
+/// Tells the user lid-closed mode stopped at a safety limit. Modal, so it waits on screen for
+/// when the lid is opened again; nothing else needs the event loop while it shows.
+pub fn notify_stop(reason: &str) {
+    alert(
+        "Lid-closed mode stopped",
+        &format!(
+            "Caffeinous stopped keeping the Mac awake with the lid closed because {reason}. \
+             The Mac sleeps when the lid closes again. Caffeinous is still on otherwise."
+        ),
+    );
 }
 
 pub fn show_about() {
