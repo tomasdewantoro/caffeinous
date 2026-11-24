@@ -28,20 +28,38 @@ rejects apps that request escalation to root, so do not try to ship the lid feat
 
 ### Signing and notarization
 
-Each step runs only when its secrets exist. Without them, the dmg is ad-hoc signed, and
-Gatekeeper blocks the first launch: right-click the app and choose **Open**, or run
-`xattr -dr com.apple.quarantine /Applications/Caffeinous.app`.
+Each step runs only when its secrets exist (**Settings → Secrets and variables → Actions**).
+Without them the dmg is ad-hoc signed and macOS refuses the first launch; users then have to
+open **System Settings → Privacy & Security** and click **Open Anyway**.
+
+**Signing**, needs a Developer ID Application certificate:
 
 | Secret | Value |
 |---|---|
-| `APPLE_CERTIFICATE` | base64 of the "Developer ID Application" `.p12` |
-| `APPLE_CERTIFICATE_PASSWORD` | its export password |
+| `APPLE_CERTIFICATE` | the certificate and private key exported from Keychain Access as `.p12`, base64: `base64 -i cert.p12 \| pbcopy` |
+| `APPLE_CERTIFICATE_PASSWORD` | the password set when exporting the `.p12` |
 | `APPLE_SIGNING_IDENTITY` | e.g. `Developer ID Application: Tomas Dewantoro (TEAMID)` |
-| `APPLE_API_KEY` | contents of the App Store Connect API `.p8` (notarization) |
-| `APPLE_API_KEY_ID` | its key ID |
-| `APPLE_API_ISSUER` | its issuer ID |
 
-These are the same secrets the Slonview repository uses.
+**Notarization**, either method; Apple ID wins when both are set:
+
+| Secret | Value |
+|---|---|
+| `APPLE_ID` | Apple ID email |
+| `APPLE_PASSWORD` | an app-specific password from <https://account.apple.com> → Sign-In and Security |
+| `APPLE_TEAM_ID` | 10-character team ID |
+| `APPLE_API_KEY` / `APPLE_API_KEY_ID` / `APPLE_API_ISSUER` | alternatively, an App Store Connect API key (`.p8` contents, key ID, issuer ID) |
+
+These are the same secrets the Slonview repository uses. GitHub never reveals a secret's value,
+so they cannot be copied between repositories; set them again from the originals (one Developer
+ID certificate can sign any number of apps). The workflow notarizes and staples the dmg and
+notarizes the CLI binary separately.
+
+Check a signed release:
+
+```bash
+spctl --assess --type execute --verbose /Applications/Caffeinous.app
+xcrun stapler validate Caffeinous_0.1.0_universal.dmg
+```
 
 ## Mac App Store
 
