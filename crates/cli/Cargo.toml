@@ -1,0 +1,17 @@
+[package]
+name = "caffeinous-cli"
+description = "caffeinate-compatible command line for Caffeinous, with lid-closed wake"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "caffeinous"
+path = "src/main.rs"
+
+[dependencies]
+caffeinous-core.workspace = true
+clap = { version = "4.6", features = ["derive"] }
+signal-hook = "0.4"

@@ -1,0 +1,30 @@
+[package]
+name = "caffeinous-app"
+description = "Caffeinous menu-bar app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "caffeinous-app"
+path = "src/main.rs"
+
+[features]
+default = ["lid"]
+# Lid-closed wake needs root (`pmset`), which the App Store sandbox forbids.
+# Build with `--no-default-features` for the Mac App Store.
+lid = []
+
+[dependencies]
+caffeinous-core.workspace = true
+tao = { version = "0.37", default-features = false }
+tray-icon = { version = "0.26", default-features = false }
+signal-hook = "0.4"
+png = "0.18"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSUserDefaults", "NSError", "NSObject"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSResponder", "NSRunningApplication", "NSButton", "NSControl", "NSView", "NSWorkspace"] }
+objc2-service-management = { version = "0.3", default-features = false, features = ["std", "SMAppService", "objc2", "objc2-foundation"] }

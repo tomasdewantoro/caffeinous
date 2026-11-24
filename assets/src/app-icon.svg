@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2B1A3D"/>
+      <stop offset="1" stop-color="#120B1C"/>
+    </linearGradient>
+    <linearGradient id="cup" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFF6EA"/>
+      <stop offset="1" stop-color="#EAD9C4"/>
+    </linearGradient>
+    <linearGradient id="coffee" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8A4B22"/>
+      <stop offset="1" stop-color="#5A2E12"/>
+    </linearGradient>
+  </defs>
+  <!-- macOS icon grid: 824px rounded square centred in 1024. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <!-- Moon: awake through the night. -->
+  <path d="M760 210a92 92 0 1 0 74 150a112 112 0 1 1 -74 -150z" fill="#F6C860"/>
+  <circle cx="275" cy="270" r="9" fill="#F6C860" opacity=".8"/>
+  <circle cx="350" cy="205" r="6" fill="#F6C860" opacity=".6"/>
+  <circle cx="610" cy="215" r="7" fill="#F6C860" opacity=".7"/>
+  <!-- Steam. -->
+  <g fill="none" stroke="#FFF6EA" stroke-width="30" stroke-linecap="round" opacity=".85">
+    <path d="M400 300c-35 40 35 75 0 120"/>
+    <path d="M500 280c-35 40 35 75 0 120"/>
+    <path d="M600 300c-35 40 35 75 0 120"/>
+  </g>
+  <!-- Handle. -->
+  <path d="M700 520h40a85 85 0 0 1 0 170h-60" fill="none" stroke="url(#cup)" stroke-width="46" stroke-linecap="round"/>
+  <!-- Cup body. -->
+  <path d="M290 470h440v150c0 130-98 220-220 220s-220-90-220-220z" fill="url(#cup)"/>
+  <ellipse cx="510" cy="470" rx="220" ry="38" fill="url(#coffee)"/>
+  <!-- Saucer. -->
+  <rect x="250" y="822" width="520" height="34" rx="17" fill="#EAD9C4" opacity=".9"/>
+</svg>

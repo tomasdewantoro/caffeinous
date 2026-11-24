@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44">
+  <!-- Template image: only alpha matters; macOS tints it for light/dark menu bars. -->
+  <g fill="none" stroke="#000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15 4c-2 2.5 2 4.5 0 7M21 4c-2 2.5 2 4.5 0 7M27 4c-2 2.5 2 4.5 0 7"/>
+    <path d="M32 21h2.5a5 5 0 0 1 0 10H31"/>
+  </g>
+  <path d="M7 16h26v9c0 8.3-5.8 14-13 14S7 33.3 7 25z" fill="#000"/>
+</svg>
