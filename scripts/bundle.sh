@@ -26,7 +26,8 @@ done
 version=$(cargo metadata --no-deps --format-version 1 \
   | jq -r '.packages[] | select(.name == "caffeinous-app") | .version')
 build=${BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}
-features=()
+# Always non-empty: macOS ships bash 3.2, where "${empty[@]}" fails under `set -u`.
+features=(--features "")
 [[ $mode == appstore ]] && features=(--no-default-features)
 
 if [[ $universal == 1 ]]; then
