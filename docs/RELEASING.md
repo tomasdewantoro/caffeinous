@@ -26,6 +26,17 @@ on the Mac App Store at all, and GitHub (plus Homebrew) stays the only distribut
 
 4. The `Release` workflow checks the tag matches the crate version, builds a universal dmg and
    CLI tarball, and attaches them with `SHA256SUMS` to a **draft** release. Review and publish.
+5. Publishing triggers the `Homebrew` workflow, which downloads the dmg, writes the new version
+   and SHA-256 into `Casks/caffeinous.rb` in
+   [tomasdewantoro/homebrew-tap](https://github.com/tomasdewantoro/homebrew-tap), and pushes.
+   To re-run it for an existing release, start it from the Actions tab with the tag.
+
+### Homebrew tap
+
+The `Homebrew` workflow pushes to the tap with an SSH deploy key that can write to that one
+repository only. The private key is this repository's `HOMEBREW_TAP_DEPLOY_KEY` secret; the
+public key is the tap's "caffeinous release workflow" deploy key (Slonview has its own). To
+rotate it, generate a new ed25519 key pair, replace both, and delete the old deploy key.
 
 ### Signing and notarization
 

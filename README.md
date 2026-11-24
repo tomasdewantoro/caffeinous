@@ -18,7 +18,13 @@ you close the lid, with no external display attached.
 
 ## Install
 
-Download the dmg from the [latest release](https://github.com/tomasdewantoro/caffeinous/releases),
+With [Homebrew](https://brew.sh):
+
+```bash
+brew install --cask tomasdewantoro/tap/caffeinous
+```
+
+Or download the dmg from the [latest release](https://github.com/tomasdewantoro/caffeinous/releases),
 open it and drag Caffeinous to Applications. It runs on macOS 13 or later, Apple Silicon and
 Intel. Releases are signed with a Developer ID and notarized by Apple, so they open without a
 Gatekeeper prompt.
